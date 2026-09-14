@@ -1,0 +1,7 @@
+# The Dockerfile copies nothing — the repo arrives via bind mount at runtime
+# (see compose.yaml). Everything here is excluded purely to keep the build
+# context small; without it the daemon would ingest ~16 GB of data/ and the
+# body-model zip on every build.
+*
+
+# Nothing is un-ignored: the image is dependencies only.

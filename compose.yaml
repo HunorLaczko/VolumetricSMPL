@@ -1,0 +1,43 @@
+# Run from the repo root:  docker compose build train  /  docker compose run --rm train ...
+services:
+  train:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: volumetricsmpl-train:cu129
+
+    # Optional. Holds WANDB_API_KEY for --wandb runs (see .env.example). Injected at
+    # runtime and never baked into an image layer.
+    env_file:
+      - path: .env
+        required: false
+
+    # The repo (including data/, which is gitignored) is bind-mounted rather than
+    # copied, so code edits need no rebuild and the dataset is not duplicated into the
+    # image.
+    volumes:
+      - .:/workspace
+      # Persist torch.hub downloads (the released checkpoints) across `run --rm`.
+      - torch-cache:/root/.cache/torch
+    working_dir: /workspace
+
+    # DataLoader workers communicate through /dev/shm; the 64 MB default causes opaque
+    # worker crashes under load.
+    shm_size: "8gb"
+
+    environment:
+      PYTHONPATH: /workspace
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+    stdin_open: true
+    tty: true
+
+volumes:
+  torch-cache:
