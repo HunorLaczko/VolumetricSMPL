@@ -1,202 +1,73 @@
-""" Implementation from Buddi https://github.com/muelea/buddi """
-import torch
+"""Generalized winding numbers for inside/outside tests against triangle soups.
+
+The original package's utility (from BUDDI, https://github.com/muelea/buddi): the winding
+number of a point is the sum of the solid angles its triangles subtend, over 4*pi. It is 1
+inside a closed mesh and 0 outside, and degrades gracefully on open or self-intersecting
+ones.
+
+    Robust Inside-Outside Segmentation using Generalized Winding Numbers.
+    Jacobson, Kavan, Sorkine-Hornung. SIGGRAPH 2013.
+
+The original materialises a (B, Q, F, 3, 3) tensor. Here both the query and the triangle
+axes are blocked, so memory is bounded by `query_chunk x tri_chunk`.
+"""
+from __future__ import annotations
+
+import functools
 import math
-import numpy as np
-from typing import NewType
-import torch.nn.functional as F
 
-Tensor = NewType('Tensor', torch.Tensor)
-
-def batch_face_normals(triangles):
-    # Calculate the edges of the triangles
-    # Size: BxFx3
-    edge0 = triangles[:, :, 1] - triangles[:, :, 0]
-    edge1 = triangles[:, :, 2] - triangles[:, :, 0]
-    # Compute the cross product of the edges to find the normal vector of
-    # the triangle
-    aCrossb = torch.cross(edge0, edge1, dim=2)
-    # Normalize the result to get a unit vector
-    normals = aCrossb / torch.norm(aCrossb, 2, dim=2, keepdim=True)
-
-    return normals
+import jax
+import jax.numpy as jnp
 
 
-def compute_vertex_normals(vertices, faces):
+def solid_angles(points, triangles):
+    """Solid angle each triangle subtends at each point (Van Oosterom & Strackee, 1983).
+
+    Args:
+        points:    (B, Q, 3)
+        triangles: (B, F, 3, 3)
+    Returns:
+        (B, Q, F)
     """
-    from :https://github.com/ShichenLiu/SoftRas/blob/master/soft_renderer/functional/vertex_normals.py
-    :param vertices: [batch size, number of vertices, 3]
-    :param faces: [batch size, number of faces, 3]
-    :return: [batch size, number of vertices, 3]
+    centered = triangles[:, None] - points[:, :, None, None]        # (B, Q, F, 3, 3)
+    norms = jnp.linalg.norm(centered, axis=-1)                       # (B, Q, F, 3)
+    a, b, c = centered[..., 0, :], centered[..., 1, :], centered[..., 2, :]
+    numerator = jnp.sum(a * jnp.cross(b, c), axis=-1)
+    denominator = (norms.prod(axis=-1)
+                   + jnp.sum(a * b, axis=-1) * norms[..., 2]
+                   + jnp.sum(a * c, axis=-1) * norms[..., 1]
+                   + jnp.sum(b * c, axis=-1) * norms[..., 0])
+    return 2.0 * jnp.arctan2(numerator, denominator)
+
+
+@functools.partial(jax.jit, static_argnames=('query_chunk', 'tri_chunk'))
+def winding_numbers(points, triangles, query_chunk: int = 256, tri_chunk: int = 2048):
+    """Generalized winding number of each point.
+
+    Args:
+        points:    (B, Q, 3)
+        triangles: (B, F, 3, 3)
+    Returns:
+        (B, Q)
     """
-    assert (vertices.ndimension() == 3)
-    assert (faces.ndimension() == 3 or faces.ndimension() == 2)
-    if faces.ndimension() == 2:
-        faces = faces.unsqueeze_(0).repeat([vertices.shape[0],1,1])
-    assert (vertices.shape[0] == faces.shape[0])
-    assert (vertices.shape[2] == 3)
-    assert (faces.shape[2] == 3)
+    B, Q = points.shape[:2]
+    F = triangles.shape[1]
 
-    bs, nv = vertices.shape[:2]
-    bs, nf = faces.shape[:2]
-    device = vertices.device
-    normals = torch.zeros(bs * nv, 3).to(device)
-    faces = faces + (torch.arange(bs).to(device) * nv)[:, None, None] # expanded faces
-    vertices_faces = vertices.reshape((bs * nv, 3))[faces.long()]
+    # Padding triangles are collapsed to a single point, which subtends no solid angle.
+    pad_t = (-F) % tri_chunk
+    tris = jnp.concatenate([triangles, jnp.zeros((B, pad_t, 3, 3), triangles.dtype)], 1)
+    tris = jnp.moveaxis(tris.reshape(B, -1, tri_chunk, 3, 3), 1, 0)
 
-    faces = faces.view(-1, 3)
-    vertices_faces = vertices_faces.view(-1, 3, 3)
+    pad_q = (-Q) % query_chunk
+    pts = jnp.concatenate([points, jnp.zeros((B, pad_q, 3), points.dtype)], 1)
+    pts = jnp.moveaxis(pts.reshape(B, -1, query_chunk, 3), 1, 0)
 
-    normals.index_add_(0, faces[:, 1].long(),
-                       torch.cross(vertices_faces[:, 2] - vertices_faces[:, 1],
-                       vertices_faces[:, 0] - vertices_faces[:, 1]))
-    normals.index_add_(0, faces[:, 2].long(),
-                       torch.cross(vertices_faces[:, 0] - vertices_faces[:, 2],
-                       vertices_faces[:, 1] - vertices_faces[:, 2]))
-    normals.index_add_(0, faces[:, 0].long(),
-                       torch.cross(vertices_faces[:, 1] - vertices_faces[:, 0],
-                       vertices_faces[:, 2] - vertices_faces[:, 0]))
+    def per_query_block(p):
+        def step(total, t):
+            return total + solid_angles(p, t).sum(-1), None
+        total, _ = jax.lax.scan(step, jnp.zeros(p.shape[:2], p.dtype), tris)
+        return total
 
-    normals = F.normalize(normals, eps=1e-6, dim=1)
-    normals = normals.reshape((bs, nv, 3))
-    # pytorch only supports long and byte tensors for indexing
-    return normals
-
-def masked_mean_loss(dists, mask):
-    mask = mask.float()
-    valid_vals = mask.sum()
-    if valid_vals > 0:
-        loss = (mask * dists).sum() / valid_vals
-    else:
-        loss = torch.Tensor([0]).cuda()
-    return loss
-
-def batch_index_select(inp, dim, index):
-    views = [inp.shape[0]] + [
-        1 if i != dim else -1 for i in range(1, len(inp.shape))
-    ]
-    expanse = list(inp.shape)
-    expanse[0] = -1
-    expanse[dim] = -1
-    index = index.view(views).expand(expanse)
-    return torch.gather(inp, dim, index)
-
-
-def batch_pairwise_dist(x, y, use_cuda=True, squared=True):
-
-    bs, num_points_x, points_dim = x.size()
-    _, num_points_y, _ = y.size()
-    xx = torch.bmm(x, x.transpose(2, 1))
-    yy = torch.bmm(y, y.transpose(2, 1))
-    zz = torch.bmm(x, y.transpose(2, 1))
-    if use_cuda:
-        dtype = torch.cuda.LongTensor
-    else:
-        dtype = torch.LongTensor
-    diag_ind_x = torch.arange(0, num_points_x).type(dtype)
-    diag_ind_y = torch.arange(0, num_points_y).type(dtype)
-    rx = (
-        xx[:, diag_ind_x, diag_ind_x]
-        .unsqueeze(1)
-        .expand_as(zz.transpose(2, 1))
-    )
-    ry = yy[:, diag_ind_y, diag_ind_y].unsqueeze(1).expand_as(zz)
-    P = rx.transpose(2, 1) + ry - 2 * zz
-
-    if not squared:
-        P = torch.sqrt(P)
-
-    return P
-
-def solid_angles(
-    points: Tensor,
-    triangles: Tensor,
-    thresh: float = 1e-8
-) -> Tensor:
-    ''' Compute solid angle between the input points and triangles
-        Follows the method described in:
-        The Solid Angle of a Plane Triangle
-        A. VAN OOSTEROM AND J. STRACKEE
-        IEEE TRANSACTIONS ON BIOMEDICAL ENGINEERING,
-        VOL. BME-30, NO. 2, FEBRUARY 1983
-        Parameters
-        -----------
-            points: BxQx3
-                Tensor of input query points
-            triangles: BxFx3x3
-                Target triangles
-            thresh: float
-                float threshold
-        Returns
-        -------
-            solid_angles: BxQxF
-                A tensor containing the solid angle between all query points
-                and input triangles
-    '''
-    # Center the triangles on the query points. Size should be BxQxFx3x3
-    centered_tris = triangles[:, None] - points[:, :, None, None]
-
-    # BxQxFx3
-    norms = torch.norm(centered_tris, dim=-1)
-
-    # Should be BxQxFx3
-    cross_prod = torch.cross(
-        centered_tris[:, :, :, 1], centered_tris[:, :, :, 2], dim=-1)
-    # Should be BxQxF
-    numerator = (centered_tris[:, :, :, 0] * cross_prod).sum(dim=-1)
-    del cross_prod
-
-    dot01 = (centered_tris[:, :, :, 0] * centered_tris[:, :, :, 1]).sum(dim=-1)
-    dot12 = (centered_tris[:, :, :, 1] * centered_tris[:, :, :, 2]).sum(dim=-1)
-    dot02 = (centered_tris[:, :, :, 0] * centered_tris[:, :, :, 2]).sum(dim=-1)
-    del centered_tris
-
-    denominator = (
-        norms.prod(dim=-1) +
-        dot01 * norms[:, :, :, 2] +
-        dot02 * norms[:, :, :, 1] +
-        dot12 * norms[:, :, :, 0]
-    )
-    del dot01, dot12, dot02, norms
-
-    # Should be BxQ
-    solid_angle = torch.atan2(numerator, denominator)
-    del numerator, denominator
-
-    torch.cuda.empty_cache()
-
-    return 2 * solid_angle
-
-
-def winding_numbers(
-    points: Tensor,
-    triangles: Tensor,
-    thresh: float = 1e-8
-) -> Tensor:
-    ''' Uses winding_numbers to compute inside/outside
-        Robust inside-outside segmentation using generalized winding numbers
-        Alec Jacobson,
-        Ladislav Kavan,
-        Olga Sorkine-Hornung
-        Fast Winding Numbers for Soups and Clouds SIGGRAPH 2018
-        Gavin Barill
-        NEIL G. Dickson
-        Ryan Schmidt
-        David I.W. Levin
-        and Alec Jacobson
-        Parameters
-        -----------
-            points: BxQx3
-                Tensor of input query points
-            triangles: BxFx3x3
-                Target triangles
-            thresh: float
-                float threshold
-        Returns
-        -------
-            winding_numbers: BxQ
-                A tensor containing the Generalized winding numbers
-    '''
-    # The generalized winding number is the sum of solid angles of the point
-    # with respect to all triangles.
-    return 1 / (4 * math.pi) * solid_angles(
-        points, triangles, thresh=thresh).sum(dim=-1)
+    total = jax.lax.map(per_query_block, pts)                        # (n, B, query_chunk)
+    total = jnp.moveaxis(total, 0, 1).reshape(B, -1)[:, :Q]
+    return total / (4.0 * math.pi)
