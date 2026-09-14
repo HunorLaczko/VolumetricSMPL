@@ -1,91 +1,215 @@
-# VolumetricSMPL: A Neural Volumetric Body Model for Efficient Interactions, Contacts, and Collisions
+# VolumetricSMPL in JAX
 
-[![PyPI version](https://badge.fury.io/py/VolumetricSMPL.svg)](https://pypi.org/project/VolumetricSMPL/) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT) [![Paper](https://img.shields.io/badge/Paper-ICCV%202025%20Highlight-brightgreen)](https://arxiv.org/abs/2506.23236) [![Video](https://img.shields.io/badge/Video-YouTube-red)](https://youtu.be/XmY_W_F58cA)
+> **Unofficial.** This is a fork of [markomih/VolumetricSMPL](https://github.com/markomih/VolumetricSMPL)
+> (ICCV 2025). This branch ports the VolumetricSMPL package to JAX, with no PyTorch dependency, and
+> adds a JAX implementation of the paper's training and evaluation pipeline, which was never
+> released. The PyTorch implementation of the pipeline is on the
+> [`main`](https://github.com/HunorLaczko/VolumetricSMPL/tree/main) branch. It is not affiliated with
+> the authors.
 
-<div align="center">
-  <img src="https://markomih.github.io/VolumetricSMPL/assets/teaser.jpeg" alt="VolumetricSMPL Teaser" width="600"/>
-</div>
+[![Paper](https://img.shields.io/badge/Paper-ICCV%202025%20Highlight-brightgreen)](https://arxiv.org/abs/2506.23236) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-## 🌟 TL;DR
+## Results
 
-**VolumetricSMPL** is a lightweight, plug-and-play extension for SMPL(-X) models that adds volumetric functionality via Signed Distance Fields (SDFs). With minimal integration—just a single line of code—users gain access to fast and differentiable SDF queries, collision detection, and self-intersection resolution.
+SMPL-X neutral, AMASS PosePrior validation set (316 bodies), mean ± sd over 5 sampling seeds, all
+scored by this branch's evaluation harness under the same protocol.
 
-## ✨ Key Features
+| Model | IoU mean | IoU surface | IoU uniform |
+|---|---:|---:|---:|
+| Released checkpoint | 91.51 ± 0.03 | 88.49 ± 0.05 | 94.53 ± 0.02 |
+| **Trained from scratch on this branch** | **93.47 ± 0.03** | **91.11 ± 0.05** | **95.83 ± 0.04** |
+| Trained with the PyTorch implementation (`main`) | 93.63 ± 0.02 | 91.34 ± 0.03 | 95.92 ± 0.02 |
+| Paper, Table 1 | 94.67 | 94.25 | 95.10 |
 
-- 🔌 **Single-line integration** with existing SMPL models
-- ⚡ **Fast and differentiable** SDF queries
-- 🛡️ **Built-in collision detection** and self-intersection resolution
-- 🔄 **Compatible** with SMPL, SMPLH, and SMPL-X
-- 🎯 **Efficient interaction modeling** for perception and reconstruction tasks
+**The target is the released checkpoint, not the paper's table.** The paper does not state its
+evaluation protocol, and no single protocol reproduces all of its numbers (see
+[FINDINGS.md](FINDINGS.md#4-evaluation-protocol)). A trained model passes if its IoU mean is no more
+than 0.3 below the released checkpoint's. The model trained here passes by +1.96. Training takes
+16.3 h on one 16 GB GPU, 1.23× faster than the PyTorch implementation.
 
-## 📚 Paper & Resources
+The recovered training recipe, the design decisions, the checks against the PyTorch implementation
+and the bugs found along the way are in **[FINDINGS.md](FINDINGS.md)**.
 
-- **📄 Paper**: [arXiv](https://arxiv.org/abs/2506.23236)
-- **🎥 Video**: [YouTube](https://youtu.be/XmY_W_F58cA)
-- **🌐 Project Page**: [markomih.github.io/VolumetricSMPL](https://markomih.github.io/VolumetricSMPL)
-- **📦 Applications**: [VolumetricSMPL_applications](https://github.com/markomih/VolumetricSMPL_applications)
+## The package
 
-## 🚀 Quick Start
-
-### Installation
-
-Ensure that PyTorch and PyTorch3D are installed with GPU support. Then install VolumetricSMPL:
+`VolumetricSMPL` attaches a learned signed distance field to an SMPL-X body. This port reads the
+SMPL-X model file and the released checkpoints directly, so it needs neither PyTorch nor `smplx`.
+Only SMPL-X is supported.
 
 ```bash
-pip install VolumetricSMPL
+pip install "jax[cuda12]"
+pip install git+https://github.com/HunorLaczko/VolumetricSMPL.git@jax
 ```
 
-### Basic Usage
-
-Extend an existing [SMPL-X](https://github.com/vchoutas/smplx) model with volumetric functionalities:
+You need the SMPL-X model file (see [Data](#data)). The released weights are downloaded on first use.
 
 ```python
-import smplx
-from VolumetricSMPL import attach_volume
+import jax
+from VolumetricSMPL import VolumetricSMPL, winding_numbers
 
-# Create a SMPL body and extend it with volumetric functionalities
-# Supports SMPL, SMPLH, and SMPL-X
-model = smplx.create(**smpl_parameters)
-attach_volume(model)
+model = VolumetricSMPL.create('data/body_models', gender='neutral')
 
-# Forward pass
-smpl_output = model(**smpl_data)  
+# smplx's parameter names; anything left out is zero
+body = model.forward(betas=betas, global_orient=global_orient, body_pose=body_pose, transl=transl)
+code = model.encode(body, jax.random.PRNGKey(0))
 
-# Ensure valid SMPL variables (pose parameters, joints, and vertices)
-assert model.joint_mapper is None, "VolumetricSMPL requires valid SMPL joints as input."
-
-# Access volumetric functionalities
-model.volume.query(scan_point_cloud)                 # Query SDF for given points
-model.volume.selfpen_loss(smpl_output)               # Compute self-intersection loss
-model.volume.collision_loss(smpl_output, scan_point_cloud)  # Compute collisions with external geometries
+sdf = model.query(points, code)                      # (B, T), negative inside
+occupancy = model.query_occupancy(points, code)      # (B, T)
+penetration = model.collision_loss(scan_points, code)                 # (B,)
+self_intersection = model.self_collision_loss(body, code, jax.random.PRNGKey(1))  # (B,)
+meshes = model.extract_mesh(body, code)              # one part-coloured trimesh.Trimesh per body
 ```
 
-## 📖 Detailed Usage
+Every method is a pure function of its inputs, so losses can be differentiated with respect to the
+body parameters:
 
-VolumetricSMPL extends the interface of the [SMPL-X package](https://github.com/vchoutas/smplx) by attaching a volumetric representation to the body model. This allows for:
+```python
+def objective(body_pose):
+    body = model.forward(betas=betas, body_pose=body_pose)
+    return model.collision_loss(scan_points, model.encode(body, key)).sum()
 
-- **Querying signed distance fields** for arbitrary points
-- **Accessing collision loss terms** for optimization
-- **Self-intersection detection** and resolution
-- **Efficient interaction modeling** with 3D geometries
+grad = jax.jit(jax.grad(objective))(body_pose)
+```
 
-For further examples and use cases, check out our [Applications repository](https://github.com/markomih/VolumetricSMPL_applications). 
+| Method | Returns |
+|---|---|
+| `VolumetricSMPL.create(model_path, gender, weights)` | The model. `weights` is `'released'`, a PyTorch `.ckpt`, or an `.npz` from `training.train` |
+| `forward(**params)` | `BodyOutput(vertices, joints, full_pose)` |
+| `encode(body, key)` | Part transforms, part boxes and latent codes; the input to every query |
+| `query`, `query_occupancy` | Signed distance and occupancy at query points |
+| `part_labels` | Index of the nearest body part per point |
+| `collision_loss`, `collision_loss_mean`, `collision_loss_gmof` | Penetration of external points into the body |
+| `self_collision_loss` | Penalty on space claimed by two non-adjacent parts |
+| `extract_mesh(body, code, voxel_mm, field)` | Marching-cubes meshes of the field |
+| `winding_numbers(points, triangles)` | Generalized winding numbers against a triangle soup |
 
+Importing the package disables XLA's Triton GEMM fusion, which computes wrong values for this model
+on GPU, and sets float32 matmul precision to `highest`. Import it before running any other JAX code.
+See [FINDINGS.md](FINDINGS.md#8-pitfalls-and-upstream-issues).
 
-## 📦 Pretrained Models
+## Repository layout
 
-Pretrained models are automatically fetched and loaded when you first use VolumetricSMPL. They can also be found in the `dev` branch inside the `./models` directory.
+| Path | Contents |
+|---|---|
+| `VolumetricSMPL/` | The package |
+| `training/` | Data pipeline, training loop, evaluation harness, audit, report and tests |
+| `docker/`, `compose.yaml` | Containerised environment (JAX 0.10.2, CUDA 12) |
+| `FINDINGS.md` | What was measured, decided and found, with the numbers |
 
-## 🔧 Requirements
+| Module | Responsibility |
+|---|---|
+| `VolumetricSMPL/volumetric_smpl.py` | The public model |
+| `VolumetricSMPL/assets.py`, `partition.py` | SMPL-X buffers from the model file; the 15-part body decomposition |
+| `VolumetricSMPL/checkpoint.py` | Reads PyTorch checkpoints without PyTorch; downloads the released ones |
+| `VolumetricSMPL/lbs.py`, `modules.py`, `model.py` | SMPL-X skinning, the PointNet encoder and NBW decoder, the fused field and its losses |
+| `VolumetricSMPL/geometry.py`, `collision.py`, `mesh.py`, `winding_numbers.py` | Distances and sampling, collision terms, mesh extraction, winding numbers |
+| `training/amass.py`, `cache.py` | AMASS npz tree → pose cache with a content-addressed manifest; split definitions |
+| `training/sampling.py`, `occupancy.py` | Query-point protocol; ray-stabbing parity occupancy and a trimesh reference |
+| `training/train.py`, `init.py` | Jitted training step with on-device data generation; the original initialisation |
+| `training/evaluate.py` | IoU uniform/surface/mean, MSE SDF, MSE \|SDF\|; the reference gate |
+| `training/audit.py` | Checks that the evaluation itself can be trusted |
+| `training/report.py`, `meshmetrics.py`, `viz.py` | Surface metrics with an exact distance; 3D panels |
+| `training/test_parity.py`, `test_api.py`, `test_golden.py` | Geometry against analytic and independent answers; package invariants; pinned-batch regression test |
 
-- Python 3.7+
-- PyTorch 
-- PyTorch3D
-- SMPL-X
+## Setup
 
-## 📄 Citation
+### Requirements
 
-If you find this work useful, please cite our paper:
+- An NVIDIA GPU with a recent driver, Docker, and the NVIDIA Container Toolkit (on Windows, Docker
+  Desktop with the WSL 2 backend).
+- Optional: a [Weights & Biases](https://wandb.ai) account for `--wandb`. Copy `.env.example` to `.env`
+  and set `WANDB_API_KEY`.
+
+### Data
+
+Both datasets are licence-gated, so they are not included. Register and download them yourself:
+
+- **SMPL-X body models** from [smpl-x.is.tue.mpg.de](https://smpl-x.is.tue.mpg.de), version 1.1. Only
+  the `.npz` files are needed.
+- **AMASS**, *SMPL-X G* flavour, from [amass.is.tue.mpg.de](https://amass.is.tue.mpg.de). Training and
+  evaluation need BMLmovi, DFaust and PosePrior. BMLrub is only needed for the `holdout_bmlrub` split.
+
+```
+data/
+├── body_models/smplx/SMPLX_NEUTRAL.npz
+└── extracted/
+    ├── BMLmovi/<subject>/*_stageii.npz
+    ├── DFaust/...
+    ├── PosePrior/...
+    └── BMLrub/...            # optional
+```
+
+### Environment
+
+```bash
+docker compose build jax
+docker compose run --rm jax python docker/verify_env.py
+```
+
+The image contains only dependencies. The repository, including `data/`, is bind-mounted at
+`/workspace`, so code changes never need a rebuild. `verify_env.py` checks the GPU, the compiler
+setting above and the geometry ops against analytic answers. Exact resolved versions are in
+[`docker/requirements.lock.txt`](docker/requirements.lock.txt).
+
+## Usage
+
+All commands run inside the container: prefix each with `docker compose run --rm jax`.
+
+**Build the pose caches.** This is a one-off. Splits are declared in `training/cache.py`, and each
+build checks the expected body count:
+
+```bash
+python -m training.cache --split val      # 316 bodies
+python -m training.cache --split train    # 256,045 bodies
+```
+
+**Evaluate the released checkpoint.** This establishes the reference and needs no training:
+
+```bash
+python -m training.evaluate
+```
+
+**Train:**
+
+```bash
+python -m training.train --smoke                                  # 200 steps, to check the loop runs
+python -m training.train --wandb --out-dir runs/jax_smplx_neutral # the full 15 epochs
+```
+
+Checkpoints are written every 5,000 steps as `.npz`, and `metrics.csv` in the output directory logs
+every 200 steps.
+
+**Evaluate, audit and report on a trained model:**
+
+```bash
+python -m training.evaluate --weights runs/jax_smplx_neutral/ckpts/last.npz
+python -m training.audit    --weights runs/jax_smplx_neutral/ckpts/last.npz
+python -m training.report   --weights runs/jax_smplx_neutral/ckpts/last.npz [--no-wandb]
+```
+
+Sampling is stochastic, so compare seed-averaged results. `evaluate` runs 5 seeds by default.
+
+**Tests:**
+
+```bash
+python -m training.test_parity --bodies 4   # distances, occupancy vs trimesh, distance scale, extraction
+python -m training.test_api                 # package invariants: queries, collisions, winding numbers, meshes
+python -m training.test_golden              # pinned batch and losses; fails on any pipeline drift
+```
+
+### Notes
+
+- **The ragged training budget.** The jitted step evaluates at most `--ragged-pad` (2,048) in-box
+  points per body part. On the full training split that overflowed on ~9% of steps, dropping ~0.6%
+  of the occupancy signal. A larger budget is exact but slower. Overflow is logged as
+  `ragged_overflow`.
+- **Do not run other GPU work while training.** On Windows (WDDM), two heavy GPU processes can trigger
+  a driver reset that kills both.
+- In Git Bash, prefix commands with `MSYS_NO_PATHCONV=1`, or container paths get rewritten.
+
+## Citation
+
+The model and the released checkpoints are the work of the original authors:
 
 ```bibtex
 @inproceedings{ICCV25:VolumetricSMPL,
@@ -96,19 +220,14 @@ If you find this work useful, please cite our paper:
 }
 ```
 
-## 👥 Authors
+- **Paper**: [arXiv](https://arxiv.org/abs/2506.23236)
+- **Project page**: [markomih.github.io/VolumetricSMPL](https://markomih.github.io/VolumetricSMPL)
+- **Original package**: [markomih/VolumetricSMPL](https://github.com/markomih/VolumetricSMPL)
 
-- [Marko Mihajlovic](https://markomih.github.io/) (ETH Zurich)
-- [Siwei Zhang](https://sanweiliti.github.io/) (ETH Zurich)
-- [Gen Li](https://vlg.inf.ethz.ch/team/Gen-Li.html) (ETH Zurich)
-- [Kaifeng Zhao](https://zkf1997.github.io/) (ETH Zurich)
-- [Lea Müller](https://muelea.github.io/) (UC Berkeley)
-- [Siyu Tang](https://vlg.inf.ethz.ch/team/Prof-Dr-Siyu-Tang.html) (ETH Zurich)
-
-## Contact
-
-For questions, please contact [Marko Mihajlovic](mailto:markomih@ethz.ch) or raise an issue on [GitHub](https://github.com/markomih/VolumetricSMPL).
+**Authors:** [Marko Mihajlovic](https://markomih.github.io/), [Siwei Zhang](https://sanweiliti.github.io/),
+[Gen Li](https://vlg.inf.ethz.ch/team/Gen-Li.html), [Kaifeng Zhao](https://zkf1997.github.io/),
+[Lea Müller](https://muelea.github.io/) and [Siyu Tang](https://vlg.inf.ethz.ch/team/Prof-Dr-Siyu-Tang.html).
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+MIT, as the original. See [LICENSE](LICENSE).
