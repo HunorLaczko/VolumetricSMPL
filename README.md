@@ -31,7 +31,7 @@ margin of +2.16. That margin survives controls for memorisation, validation-set 
 selection, metric bugs and training-set size. The full evidence trail, the recovered training recipe,
 the design decisions and the upstream bugs found along the way are in **[FINDINGS.md](FINDINGS.md)**.
 
-A second, independent implementation in JAX lives on the [`jax`](../../tree/jax) branch.
+The [`jax`](../../tree/jax) branch ports the package and this pipeline to JAX, with no PyTorch dependency.
 
 ## What this fork adds
 
