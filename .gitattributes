@@ -1,0 +1,14 @@
+# The repo is edited on Windows but executed inside a Linux container, so LF is
+# checked out everywhere. Without this, a CRLF shebang or shell script fails in
+# the container with an opaque "bad interpreter" error, and diffs churn on every
+# host/container round trip.
+* text=auto eol=lf
+
+# Never normalise binary payloads.
+*.npz binary
+*.pkl binary
+*.ckpt binary
+*.zip binary
+*.bz2 binary
+*.png binary
+*.jpg binary

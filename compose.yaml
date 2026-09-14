@@ -1,0 +1,49 @@
+# Run from the repo root:  docker compose build jax  /  docker compose run --rm jax ...
+services:
+  jax:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: volumetricsmpl:jax
+
+    # Optional. Holds WANDB_API_KEY for --wandb runs (see .env.example). Injected at
+    # runtime and never baked into an image layer.
+    env_file:
+      - path: .env
+        required: false
+
+    # The repo (including data/, which is gitignored) is bind-mounted rather than
+    # copied, so code edits need no rebuild and the dataset is not duplicated into the
+    # image.
+    volumes:
+      - .:/workspace
+      # JIT-compiled kernels survive `run --rm`, so repeated invocations skip
+      # recompiling the step.
+      - jax-cache:/root/.cache/jax
+      # The released checkpoints, downloaded on first use.
+      - model-cache:/root/.cache/VolumetricSMPL
+    working_dir: /workspace
+
+    environment:
+      PYTHONPATH: /workspace
+      # Without this JAX preallocates ~75% of the card on first use.
+      XLA_PYTHON_CLIENT_PREALLOCATE: "false"
+      # Triton GEMM fusion computes wrong values for the decoder; see
+      # VolumetricSMPL/__init__.py.
+      XLA_FLAGS: "--xla_gpu_enable_triton_gemm=false"
+      JAX_COMPILATION_CACHE_DIR: /root/.cache/jax
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+    stdin_open: true
+    tty: true
+
+volumes:
+  jax-cache:
+  model-cache:

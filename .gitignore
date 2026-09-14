@@ -137,3 +137,15 @@ COAP_DATA/
 BENCHMARK_*/
 TMP_*/
 MANO/
+
+# --- Training reimplementation ---
+# AMASS archives + extracted npz tree and the SMPL/SMPL-X model downloads.
+# All are licence-gated and must never be committed.
+data/
+models_smplx_v1_1.zip
+SMPL_python_v*.zip
+
+# Run artefacts
+runs/
+wandb/
+*.ckpt
