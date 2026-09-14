@@ -1,0 +1,34 @@
+{
+  "cache_hash": "be658e60af29e592cd7496a960fb4e5de6d101f10c862f0bc13ea278349096ac",
+  "shape": [
+    8,
+    7680,
+    3
+  ],
+  "points_sha256": "a268bf727db8a31553267e070046132a1c400a1ade8bea343397d1de9a86300c",
+  "points_mean": [
+    0.02997237,
+    -0.38732615,
+    -0.0028209
+  ],
+  "points_std": 0.34721097,
+  "gt_occ_frac_inside": 0.39664716,
+  "loss": {
+    "mse_occ": 0.02473194,
+    "mse_udf": 5.505e-05,
+    "total_loss": 0.02478699
+  },
+  "loss_ragged": {
+    "mse_occ": 0.02473194,
+    "mse_udf": 5.505e-05,
+    "total_loss": 0.02478699
+  },
+  "ragged_overflow": 0,
+  "config": {
+    "seed": 0,
+    "batch": 8,
+    "n_points": 512,
+    "sigma": 0.01,
+    "ragged_pad": 2048
+  }
+}
